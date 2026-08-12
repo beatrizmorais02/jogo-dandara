@@ -1,0 +1,29 @@
+# ============================================================
+# CALCULAR TAMANHO DO PNG DINAMICAMENTE
+# ============================================================
+cell_size_mm <- 4   # mesmo valor usado no cell_size <- unit(4, "mm")
+
+n_rows <- nrow(heatmap_mat_log)
+n_cols <- ncol(heatmap_mat_log)
+
+# Área do heatmap em mm
+heatmap_width_mm  <- n_cols * cell_size_mm
+heatmap_height_mm <- n_rows * cell_size_mm
+
+# Margem extra: legendas (direita), nomes de coluna (embaixo), 
+# títulos de split (topo), anotação + nomes de linha (esquerda)
+margin_width_mm  <- 80   # espaço pra legenda + row_labels
+margin_height_mm <- 60   # espaço pra column_names + column_title (agora em cima)
+
+total_width_mm  <- heatmap_width_mm + margin_width_mm
+total_height_mm <- heatmap_height_mm + margin_height_mm
+
+# Converter mm -> pixels (res em DPI, 1 polegada = 25.4mm)
+res_dpi <- 130
+png_width_px  <- round(total_width_mm  / 25.4 * res_dpi)
+png_height_px <- round(total_height_mm / 25.4 * res_dpi)
+
+png("heatmap_subtype_macrogroup_final.png",
+    width = png_width_px, height = png_height_px, res = res_dpi)
+draw(ht, heatmap_legend_side = "right")
+dev.off()
