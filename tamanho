@@ -1,23 +1,97 @@
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+
 # ============================================================
-# 5. MATRIZ DE SCORES — condensada para Excitatory/Inhibitory, detalhada nos demais
+# 1. LEITURA E PARSING DOS DADOS
+# ============================================================
+perb <- read.table("IC - BIOME/perbscore_all_targets_sex.txt",
+                   header = TRUE, sep = "\t")
+
+perb_parsed <- perb %>%
+  filter(binding == "antagonist") %>%
+  mutate(
+    stage    = str_extract(cell_type, "^(Early|Late)"),
+    sex      = str_extract(cell_type, "(Female|Male)"),
+    Subclass = str_remove(cell_type, "^(Early|Late)_(Female|Male)_"),
+    Subclass = ifelse(Subclass == "Immune", "Microglia", Subclass)
+  )
+
+# ============================================================
+# 2. MAPEAMENTO DOS MACROGRUPOS
+# ============================================================
+celltype_to_macro <- c(
+  "L2_3_IT"      = "Excitatory neurons",
+  "L4_IT"        = "Excitatory neurons",
+  "L5_IT"        = "Excitatory neurons",
+  "L6_IT"        = "Excitatory neurons",
+  "L6_IT_Car3"   = "Excitatory neurons",
+  "L5_ET"        = "Excitatory neurons",
+  "L5_6_NP"      = "Excitatory neurons",
+  "L6_CT"        = "Excitatory neurons",
+  "L6b"          = "Excitatory neurons",
+  "Lamp5"        = "Inhibitory neurons",
+  "Lamp5_Lhx6"   = "Inhibitory neurons",
+  "Sncg"         = "Inhibitory neurons",
+  "Vip"          = "Inhibitory neurons",
+  "Sst"          = "Inhibitory neurons",
+  "Pvalb"        = "Inhibitory neurons",
+  "Chandelier"   = "Inhibitory neurons",
+  "Pax6"         = "Inhibitory neurons",
+  "Astrocyte"           = "Astrocytes",
+  "Oligodendrocyte"     = "Oligodendrocytes",
+  "OPC"                 = "OPC",
+  "Microglia"           = "Microglia",
+  "Endothelial"         = "Endothelial",
+  "VLMC___Perivascular" = "Endothelial"
+)
+
+missing_check <- setdiff(unique(perb_parsed$Subclass), names(celltype_to_macro))
+if (length(missing_check) > 0) {
+  warning("Subclasses sem mapeamento: ", paste(missing_check, collapse = ", "))
+}
+
+perb_parsed <- perb_parsed %>%
+  mutate(macro_group = celltype_to_macro[Subclass]) %>%
+  filter(!is.na(macro_group))
+
+# ============================================================
+# 3. THRESHOLD GLOBAL — TOP 2.5%
+# ============================================================
+threshold_global <- quantile(perb_parsed$perb_score, 0.975)
+perb_top <- perb_parsed %>% filter(perb_score >= threshold_global)
+
+# ============================================================
+# 4. CLASSIFICAR GENES (SELETIVIDADE) — por macro_group
+# ============================================================
+result <- perb_top %>%
+  group_by(target) %>%
+  summarise(
+    n_macrogroups = n_distinct(macro_group),
+    max_score     = max(perb_score),
+    .groups = "drop"
+  ) %>%
+  mutate(selectivity = ifelse(n_macrogroups <= 2, "Seletivo", "Não seletivo"))
+
+# ============================================================
+# 5. MATRIZ DE SCORES — condensada (MAX) para Excitatory/Inhibitory, detalhada nos demais
 # ============================================================
 grupos_condensar <- c("Excitatory neurons", "Inhibitory neurons")
 
-# Parte condensada: agrega (média) todos os subtipos dentro do macro_group
 heatmap_df_condensado <- perb_parsed %>%
   filter(macro_group %in% grupos_condensar) %>%
   group_by(target, macro_group, stage, sex) %>%
-  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  summarise(perb_score = max(perb_score), .groups = "drop") %>%   # MAX em vez de mean
   mutate(row_name = paste0(macro_group, "_", stage, "_", sex))
 
-# Parte detalhada: mantém Subclass como linha para os demais grupos
 heatmap_df_detalhado <- perb_parsed %>%
   filter(!macro_group %in% grupos_condensar) %>%
   group_by(target, macro_group, Subclass, stage, sex) %>%
-  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  summarise(perb_score = mean(perb_score), .groups = "drop") %>%  # só junta duplicatas exatas, se houver
   mutate(row_name = paste0(Subclass, "_", stage, "_", sex))
 
-# Junta as duas partes
 heatmap_df <- bind_rows(
   heatmap_df_condensado %>% select(target, row_name, macro_group, perb_score),
   heatmap_df_detalhado  %>% select(target, row_name, macro_group, perb_score)
@@ -43,7 +117,7 @@ row_macro <- row_to_macro[rownames(heatmap_mat_log)]
 row_macro <- factor(row_macro, levels = unique(row_macro))
 
 # ============================================================
-# 6. ASTERISCO — condensado para Excitatory/Inhibitory, detalhado nos demais
+# 6. ASTERISCO — condensado (any) para Excitatory/Inhibitory, detalhado nos demais
 # ============================================================
 bool_condensado <- perb_parsed %>%
   filter(macro_group %in% grupos_condensar, target %in% result$target) %>%
@@ -126,6 +200,6 @@ ht <- Heatmap(
   }
 )
 
-png("heatmap_condensado_excit_inhib.png", width = 2400, height = 1800, res = 130)
+png("heatmap_condensado_max_excit_inhib.png", width = 2400, height = 1800, res = 130)
 draw(ht, heatmap_legend_side = "right")
 dev.off()
