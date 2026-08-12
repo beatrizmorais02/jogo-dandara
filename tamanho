@@ -1,32 +1,131 @@
 # ============================================================
-# TOP 10 GENES POR LINHA (Subtipo+Stage+Sex) — só Excitatory e Inhibitory
+# 5. MATRIZ DE SCORES — condensada para Excitatory/Inhibitory, detalhada nos demais
 # ============================================================
-top_n_por_linha <- 10
-grupos_a_filtrar <- c("Excitatory neurons", "Inhibitory neurons")
+grupos_condensar <- c("Excitatory neurons", "Inhibitory neurons")
 
-# Para cada linha dentro dos grupos-alvo, pega os top N genes daquela linha específica
-top_targets_filtrados <- heatmap_df %>%
-  filter(macro_group %in% grupos_a_filtrar) %>%
-  group_by(row_name) %>%
-  slice_max(order_by = perb_score, n = top_n_por_linha, with_ties = FALSE) %>%
-  ungroup() %>%
-  pull(target) %>%
-  unique()
+# Parte condensada: agrega (média) todos os subtipos dentro do macro_group
+heatmap_df_condensado <- perb_parsed %>%
+  filter(macro_group %in% grupos_condensar) %>%
+  group_by(target, macro_group, stage, sex) %>%
+  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  mutate(row_name = paste0(macro_group, "_", stage, "_", sex))
 
-# Targets dos outros grupos (mantidos sem filtro nenhum)
-targets_outros_grupos <- heatmap_df %>%
-  filter(!macro_group %in% grupos_a_filtrar) %>%
-  pull(target) %>%
-  unique()
+# Parte detalhada: mantém Subclass como linha para os demais grupos
+heatmap_df_detalhado <- perb_parsed %>%
+  filter(!macro_group %in% grupos_condensar) %>%
+  group_by(target, macro_group, Subclass, stage, sex) %>%
+  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  mutate(row_name = paste0(Subclass, "_", stage, "_", sex))
 
-# União final de colunas a manter
-targets_finais <- union(top_targets_filtrados, targets_outros_grupos)
-targets_finais <- intersect(targets_finais, colnames(heatmap_mat_log))
+# Junta as duas partes
+heatmap_df <- bind_rows(
+  heatmap_df_condensado %>% select(target, row_name, macro_group, perb_score),
+  heatmap_df_detalhado  %>% select(target, row_name, macro_group, perb_score)
+) %>%
+  filter(target %in% result$target)
+
+heatmap_wide <- heatmap_df %>%
+  select(-macro_group) %>%
+  pivot_wider(names_from = target, values_from = perb_score, values_fill = 0)
+
+heatmap_mat <- as.matrix(heatmap_wide[, -1])
+rownames(heatmap_mat) <- heatmap_wide$row_name
+heatmap_mat_log <- log10(heatmap_mat + 1e-20)
+
+row_to_macro <- heatmap_df %>%
+  distinct(row_name, macro_group) %>%
+  tibble::deframe()
+
+row_order_sorted <- names(sort(row_to_macro))
+heatmap_mat_log <- heatmap_mat_log[row_order_sorted, ]
+
+row_macro <- row_to_macro[rownames(heatmap_mat_log)]
+row_macro <- factor(row_macro, levels = unique(row_macro))
 
 # ============================================================
-# FILTRAR A MATRIZ E OBJETOS DEPENDENTES
+# 6. ASTERISCO — condensado para Excitatory/Inhibitory, detalhado nos demais
 # ============================================================
-heatmap_mat_log <- heatmap_mat_log[, targets_finais, drop = FALSE]
-bool_mat        <- bool_mat[, targets_finais, drop = FALSE]
+bool_condensado <- perb_parsed %>%
+  filter(macro_group %in% grupos_condensar, target %in% result$target) %>%
+  mutate(passou_top = perb_score >= threshold_global) %>%
+  group_by(target, macro_group, stage, sex) %>%
+  summarise(passou_top = any(passou_top), .groups = "drop") %>%
+  mutate(row_name = paste0(macro_group, "_", stage, "_", sex)) %>%
+  select(target, row_name, passou_top)
 
-column_split_filtrado <- result$selectivity[match(colnames(heatmap_mat_log), result$target)]
+bool_detalhado <- perb_parsed %>%
+  filter(!macro_group %in% grupos_condensar, target %in% result$target) %>%
+  mutate(
+    row_name   = paste0(Subclass, "_", stage, "_", sex),
+    passou_top = perb_score >= threshold_global
+  ) %>%
+  group_by(target, row_name) %>%
+  summarise(passou_top = any(passou_top), .groups = "drop")
+
+heatmap_df_bool <- bind_rows(bool_condensado, bool_detalhado) %>%
+  pivot_wider(names_from = target, values_from = passou_top, values_fill = FALSE)
+
+bool_mat <- as.matrix(heatmap_df_bool[, -1])
+rownames(bool_mat) <- heatmap_df_bool$row_name
+bool_mat <- bool_mat[rownames(heatmap_mat_log), colnames(heatmap_mat_log)]
+
+# ============================================================
+# 7. ANOTAÇÃO
+# ============================================================
+stage_annot <- ifelse(grepl("_Early_", rownames(heatmap_mat_log)), "Early", "Late")
+sex_annot   <- ifelse(grepl("_Female$", rownames(heatmap_mat_log)), "Female", "Male")
+
+row_annot <- rowAnnotation(
+  Stage = stage_annot,
+  Sex   = sex_annot,
+  col   = list(
+    Stage = c("Early" = "#66C2A5", "Late" = "#FC8D62"),
+    Sex   = c("Male" = "#8DA0CB", "Female" = "#E78AC3")
+  ),
+  annotation_legend_param = list(Stage = list(title = "Stage"), Sex = list(title = "Sex")),
+  simple_anno_size = unit(4, "mm")
+)
+
+row_labels_clean <- sub("_(Early|Late)_(Male|Female)$", "", rownames(heatmap_mat_log))
+
+# ============================================================
+# 8. HEATMAP FINAL
+# ============================================================
+group_sizes <- table(result$selectivity[match(colnames(heatmap_mat_log), result$target)])
+pode_clusterizar_col <- all(group_sizes >= 2)
+
+cell_size <- unit(4, "mm")
+
+ht <- Heatmap(
+  heatmap_mat_log,
+  name                    = "log10(score)",
+  width                   = ncol(heatmap_mat_log) * cell_size,
+  height                  = nrow(heatmap_mat_log) * cell_size,
+  row_labels              = row_labels_clean,
+  left_annotation         = row_annot,
+  row_split               = row_macro,
+  row_title_gp            = gpar(fontsize = 9, fontface = "bold"),
+  row_title_rot           = 0,
+  row_gap                 = unit(1.5, "mm"),
+  cluster_rows            = FALSE,
+  cluster_row_slices      = FALSE,
+  show_row_names          = TRUE,
+  row_names_gp            = gpar(fontsize = 7),
+  column_split            = result$selectivity[match(colnames(heatmap_mat_log), result$target)],
+  column_title_gp         = gpar(fontsize = 10, fontface = "bold"),
+  column_title_side       = "top",
+  cluster_columns         = pode_clusterizar_col,
+  cluster_column_slices   = FALSE,
+  show_column_dend        = FALSE,
+  show_column_names       = TRUE,
+  column_names_gp         = gpar(fontsize = 7),
+  cell_fun = function(j, i, x, y, width, height, fill) {
+    if (bool_mat[i, j]) {
+      grid.text("*", x, y, gp = gpar(fontsize = 8, fontface = "bold", col = "black"))
+    }
+  }
+)
+
+png("heatmap_condensado_excit_inhib.png", width = 2400, height = 1800, res = 130)
+draw(ht, heatmap_legend_side = "right")
+dev.off()
