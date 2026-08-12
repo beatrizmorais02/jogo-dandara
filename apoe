@@ -1,0 +1,254 @@
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ComplexHeatmap)
+library(circlize)
+
+# ============================================================
+# 1. LEITURA E PARSING DOS DADOS
+# ============================================================
+perb <- read.table("IC - BIOME/perbscore_all_targets_apoe4.txt",
+                   header = TRUE, sep = "\t")
+
+perb_parsed <- perb %>%
+  filter(binding == "antagonist") %>%   # ajuste se precisar
+  mutate(
+    stage    = str_extract(cell_type, "(Early|Late)"),
+    apoe4    = str_extract(cell_type, "APOE4_(Pos|Neg)"),
+    apoe4    = str_remove(apoe4, "APOE4_"),                       # fica só "Pos" ou "Neg"
+    Subclass = str_remove(cell_type, "_(Early|Late)_APOE4_(Pos|Neg)$"),
+    Subclass = ifelse(Subclass == "Immune", "Microglia", Subclass)
+  )
+
+# ============================================================
+# 2. MAPEAMENTO DOS MACROGRUPOS
+# ============================================================
+celltype_to_macro <- c(
+  "L2_3_IT"      = "Excitatory neurons",
+  "L4_IT"        = "Excitatory neurons",
+  "L5_IT"        = "Excitatory neurons",
+  "L6_IT"        = "Excitatory neurons",
+  "L6_IT_Car3"   = "Excitatory neurons",
+  "L5_ET"        = "Excitatory neurons",
+  "L5_6_NP"      = "Excitatory neurons",
+  "L6_CT"        = "Excitatory neurons",
+  "L6b"          = "Excitatory neurons",
+  "Lamp5"        = "Inhibitory neurons",
+  "Lamp5_Lhx6"   = "Inhibitory neurons",
+  "Sncg"         = "Inhibitory neurons",
+  "Vip"          = "Inhibitory neurons",
+  "Sst"          = "Inhibitory neurons",
+  "Pvalb"        = "Inhibitory neurons",
+  "Chandelier"   = "Inhibitory neurons",
+  "Pax6"         = "Inhibitory neurons",
+  "Astrocyte"           = "Astrocytes",
+  "Oligodendrocyte"     = "Oligodendrocytes",
+  "OPC"                 = "OPC",
+  "Microglia"           = "Microglia",
+  "Endothelial"         = "Endothelial",
+  "VLMC___Perivascular" = "Endothelial"
+)
+
+missing_check <- setdiff(unique(perb_parsed$Subclass), names(celltype_to_macro))
+if (length(missing_check) > 0) {
+  warning("Subclasses sem mapeamento: ", paste(missing_check, collapse = ", "))
+}
+
+perb_parsed <- perb_parsed %>%
+  mutate(macro_group = celltype_to_macro[Subclass]) %>%
+  filter(!is.na(macro_group))
+
+# ============================================================
+# 3. THRESHOLD GLOBAL — TOP 2.5%
+# ============================================================
+threshold_global <- quantile(perb_parsed$perb_score, 0.975)
+perb_top <- perb_parsed %>% filter(perb_score >= threshold_global)
+
+# ============================================================
+# 4. CLASSIFICAR GENES (SELETIVIDADE) — por macro_group
+# ============================================================
+result <- perb_top %>%
+  group_by(target) %>%
+  summarise(
+    n_macrogroups = n_distinct(macro_group),
+    max_score     = max(perb_score),
+    .groups = "drop"
+  ) %>%
+  mutate(selectivity = ifelse(n_macrogroups <= 2, "Seletivo", "Não seletivo"))
+
+# ============================================================
+# 5a. MATRIZ DE SCORES — VERSÃO DETALHADA (sem condensação)
+# ============================================================
+heatmap_df_full <- perb_parsed %>%
+  filter(target %in% result$target) %>%
+  group_by(target, macro_group, Subclass, stage, apoe4) %>%
+  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  mutate(row_name = paste0(Subclass, "_", stage, "_", apoe4))
+
+heatmap_wide_full <- heatmap_df_full %>%
+  select(target, row_name, perb_score) %>%
+  pivot_wider(names_from = target, values_from = perb_score, values_fill = 0)
+
+heatmap_mat_full <- as.matrix(heatmap_wide_full[, -1])
+rownames(heatmap_mat_full) <- heatmap_wide_full$row_name
+heatmap_mat_log_full <- log10(heatmap_mat_full + 1e-20)
+
+row_to_macro_full <- heatmap_df_full %>%
+  distinct(row_name, macro_group) %>%
+  tibble::deframe()
+
+row_order_full <- names(sort(row_to_macro_full))
+heatmap_mat_log_full <- heatmap_mat_log_full[row_order_full, ]
+
+row_macro_full <- row_to_macro_full[rownames(heatmap_mat_log_full)]
+row_macro_full <- factor(row_macro_full, levels = unique(row_macro_full))
+
+# Asterisco — detalhado
+bool_df_full <- perb_parsed %>%
+  filter(target %in% result$target) %>%
+  mutate(
+    row_name   = paste0(Subclass, "_", stage, "_", apoe4),
+    passou_top = perb_score >= threshold_global
+  ) %>%
+  group_by(target, row_name) %>%
+  summarise(passou_top = any(passou_top), .groups = "drop") %>%
+  pivot_wider(names_from = target, values_from = passou_top, values_fill = FALSE)
+
+bool_mat_full <- as.matrix(bool_df_full[, -1])
+rownames(bool_mat_full) <- bool_df_full$row_name
+bool_mat_full <- bool_mat_full[rownames(heatmap_mat_log_full), colnames(heatmap_mat_log_full)]
+
+# ============================================================
+# 5b. MATRIZ DE SCORES — VERSÃO CONDENSADA (max) só Excitatory/Inhibitory
+# ============================================================
+grupos_condensar <- c("Excitatory neurons", "Inhibitory neurons")
+
+heatmap_df_condensado <- perb_parsed %>%
+  filter(macro_group %in% grupos_condensar) %>%
+  group_by(target, macro_group, stage, apoe4) %>%
+  summarise(perb_score = max(perb_score), .groups = "drop") %>%
+  mutate(row_name = paste0(macro_group, "_", stage, "_", apoe4))
+
+heatmap_df_detalhado <- perb_parsed %>%
+  filter(!macro_group %in% grupos_condensar) %>%
+  group_by(target, macro_group, Subclass, stage, apoe4) %>%
+  summarise(perb_score = mean(perb_score), .groups = "drop") %>%
+  mutate(row_name = paste0(Subclass, "_", stage, "_", apoe4))
+
+heatmap_df_cond <- bind_rows(
+  heatmap_df_condensado %>% select(target, row_name, macro_group, perb_score),
+  heatmap_df_detalhado  %>% select(target, row_name, macro_group, perb_score)
+) %>%
+  filter(target %in% result$target)
+
+heatmap_wide_cond <- heatmap_df_cond %>%
+  select(-macro_group) %>%
+  pivot_wider(names_from = target, values_from = perb_score, values_fill = 0)
+
+heatmap_mat_cond <- as.matrix(heatmap_wide_cond[, -1])
+rownames(heatmap_mat_cond) <- heatmap_wide_cond$row_name
+heatmap_mat_log_cond <- log10(heatmap_mat_cond + 1e-20)
+
+row_to_macro_cond <- heatmap_df_cond %>%
+  distinct(row_name, macro_group) %>%
+  tibble::deframe()
+
+row_order_cond <- names(sort(row_to_macro_cond))
+heatmap_mat_log_cond <- heatmap_mat_log_cond[row_order_cond, ]
+
+row_macro_cond <- row_to_macro_cond[rownames(heatmap_mat_log_cond)]
+row_macro_cond <- factor(row_macro_cond, levels = unique(row_macro_cond))
+
+# Asterisco — condensado
+bool_condensado <- perb_parsed %>%
+  filter(macro_group %in% grupos_condensar, target %in% result$target) %>%
+  mutate(passou_top = perb_score >= threshold_global) %>%
+  group_by(target, macro_group, stage, apoe4) %>%
+  summarise(passou_top = any(passou_top), .groups = "drop") %>%
+  mutate(row_name = paste0(macro_group, "_", stage, "_", apoe4)) %>%
+  select(target, row_name, passou_top)
+
+bool_detalhado <- perb_parsed %>%
+  filter(!macro_group %in% grupos_condensar, target %in% result$target) %>%
+  mutate(
+    row_name   = paste0(Subclass, "_", stage, "_", apoe4),
+    passou_top = perb_score >= threshold_global
+  ) %>%
+  group_by(target, row_name) %>%
+  summarise(passou_top = any(passou_top), .groups = "drop")
+
+bool_df_cond <- bind_rows(bool_condensado, bool_detalhado) %>%
+  pivot_wider(names_from = target, values_from = passou_top, values_fill = FALSE)
+
+bool_mat_cond <- as.matrix(bool_df_cond[, -1])
+rownames(bool_mat_cond) <- bool_df_cond$row_name
+bool_mat_cond <- bool_mat_cond[rownames(heatmap_mat_log_cond), colnames(heatmap_mat_log_cond)]
+
+# ============================================================
+# 6. FUNÇÃO PRA MONTAR O HEATMAP (reaproveitada nas duas versões)
+# ============================================================
+montar_heatmap <- function(mat_log, bool_mat, row_macro, arquivo_png) {
+  stage_annot <- ifelse(grepl("_Early_", rownames(mat_log)), "Early", "Late")
+  apoe4_annot <- ifelse(grepl("_Pos$", rownames(mat_log)), "Pos", "Neg")
+
+  row_annot <- rowAnnotation(
+    Stage = stage_annot,
+    APOE4 = apoe4_annot,
+    col   = list(
+      Stage = c("Early" = "#66C2A5", "Late" = "#FC8D62"),
+      APOE4 = c("Pos" = "#D62728", "Neg" = "#1F77B4")
+    ),
+    annotation_legend_param = list(Stage = list(title = "Stage"), APOE4 = list(title = "APOE4")),
+    simple_anno_size = unit(4, "mm")
+  )
+
+  row_labels_clean <- sub("_(Early|Late)_(Pos|Neg)$", "", rownames(mat_log))
+
+  group_sizes <- table(result$selectivity[match(colnames(mat_log), result$target)])
+  pode_clusterizar_col <- all(group_sizes >= 2)
+
+  cell_size <- unit(4, "mm")
+
+  ht <- Heatmap(
+    mat_log,
+    name                    = "log10(score)",
+    width                   = ncol(mat_log) * cell_size,
+    height                  = nrow(mat_log) * cell_size,
+    row_labels              = row_labels_clean,
+    left_annotation         = row_annot,
+    row_split               = row_macro,
+    row_title_gp            = gpar(fontsize = 9, fontface = "bold"),
+    row_title_rot           = 0,
+    row_gap                 = unit(1.5, "mm"),
+    cluster_rows            = FALSE,
+    cluster_row_slices      = FALSE,
+    show_row_names          = TRUE,
+    row_names_gp            = gpar(fontsize = 7),
+    column_split            = result$selectivity[match(colnames(mat_log), result$target)],
+    column_title_gp         = gpar(fontsize = 10, fontface = "bold"),
+    column_title_side       = "top",
+    cluster_columns         = pode_clusterizar_col,
+    cluster_column_slices   = FALSE,
+    show_column_dend        = FALSE,
+    show_column_names       = TRUE,
+    column_names_gp         = gpar(fontsize = 7),
+    cell_fun = function(j, i, x, y, width, height, fill) {
+      if (bool_mat[i, j]) {
+        grid.text("*", x, y, gp = gpar(fontsize = 8, fontface = "bold", col = "black"))
+      }
+    }
+  )
+
+  png(arquivo_png, width = 2400, height = 1800, res = 130)
+  draw(ht, heatmap_legend_side = "right")
+  dev.off()
+}
+
+# ============================================================
+# 7. GERAR OS DOIS HEATMAPS
+# ============================================================
+montar_heatmap(heatmap_mat_log_full, bool_mat_full, row_macro_full,
+               "heatmap_apoe4_detalhado.png")
+
+montar_heatmap(heatmap_mat_log_cond, bool_mat_cond, row_macro_cond,
+               "heatmap_apoe4_condensado_max.png")
