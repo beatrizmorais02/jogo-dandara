@@ -1,29 +1,32 @@
 # ============================================================
-# CALCULAR TAMANHO DO PNG DINAMICAMENTE
+# TOP 10 GENES POR LINHA (Subtipo+Stage+Sex) — só Excitatory e Inhibitory
 # ============================================================
-cell_size_mm <- 4   # mesmo valor usado no cell_size <- unit(4, "mm")
+top_n_por_linha <- 10
+grupos_a_filtrar <- c("Excitatory neurons", "Inhibitory neurons")
 
-n_rows <- nrow(heatmap_mat_log)
-n_cols <- ncol(heatmap_mat_log)
+# Para cada linha dentro dos grupos-alvo, pega os top N genes daquela linha específica
+top_targets_filtrados <- heatmap_df %>%
+  filter(macro_group %in% grupos_a_filtrar) %>%
+  group_by(row_name) %>%
+  slice_max(order_by = perb_score, n = top_n_por_linha, with_ties = FALSE) %>%
+  ungroup() %>%
+  pull(target) %>%
+  unique()
 
-# Área do heatmap em mm
-heatmap_width_mm  <- n_cols * cell_size_mm
-heatmap_height_mm <- n_rows * cell_size_mm
+# Targets dos outros grupos (mantidos sem filtro nenhum)
+targets_outros_grupos <- heatmap_df %>%
+  filter(!macro_group %in% grupos_a_filtrar) %>%
+  pull(target) %>%
+  unique()
 
-# Margem extra: legendas (direita), nomes de coluna (embaixo), 
-# títulos de split (topo), anotação + nomes de linha (esquerda)
-margin_width_mm  <- 80   # espaço pra legenda + row_labels
-margin_height_mm <- 60   # espaço pra column_names + column_title (agora em cima)
+# União final de colunas a manter
+targets_finais <- union(top_targets_filtrados, targets_outros_grupos)
+targets_finais <- intersect(targets_finais, colnames(heatmap_mat_log))
 
-total_width_mm  <- heatmap_width_mm + margin_width_mm
-total_height_mm <- heatmap_height_mm + margin_height_mm
+# ============================================================
+# FILTRAR A MATRIZ E OBJETOS DEPENDENTES
+# ============================================================
+heatmap_mat_log <- heatmap_mat_log[, targets_finais, drop = FALSE]
+bool_mat        <- bool_mat[, targets_finais, drop = FALSE]
 
-# Converter mm -> pixels (res em DPI, 1 polegada = 25.4mm)
-res_dpi <- 130
-png_width_px  <- round(total_width_mm  / 25.4 * res_dpi)
-png_height_px <- round(total_height_mm / 25.4 * res_dpi)
-
-png("heatmap_subtype_macrogroup_final.png",
-    width = png_width_px, height = png_height_px, res = res_dpi)
-draw(ht, heatmap_legend_side = "right")
-dev.off()
+column_split_filtrado <- result$selectivity[match(colnames(heatmap_mat_log), result$target)]
