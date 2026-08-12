@@ -7,11 +7,11 @@ library(circlize)
 # ============================================================
 # 1. LEITURA E PARSING DOS DADOS
 # ============================================================
-perb <- read.table("AD_scRank_2025/data/sex/rank_scores/perbscore_all_targets_sex.txt",
+perb <- read.table("IC - BIOME/perbscore_all_targets_sex.txt",
                    header = TRUE, sep = "\t")
 
 perb_parsed <- perb %>%
-  filter(binding == "agonist") %>%   # ajuste/remova se você decidiu incluir antagonist também
+  filter(binding == "antagonist") %>%   # ajuste/remova se você decidiu incluir antagonist também
   mutate(
     stage    = str_extract(cell_type, "^(Early|Late)"),
     sex      = str_extract(cell_type, "(Female|Male)"),
@@ -126,8 +126,8 @@ row_annot <- rowAnnotation(
   Stage = stage_annot,
   Sex   = sex_annot,
   col   = list(
-    Stage = c("Early" = "#66C2A5", "Late" = "#FC8D62"),
-    Sex   = c("Male" = "#8DA0CB", "Female" = "#E78AC3")
+    Stage = c("Early" = "#BBDEFB", "Late" = "#1565C0"),
+    Sex   = c("Male" = "#CE93D8", "Female" = "#6A1B9A")
   ),
   annotation_legend_param = list(Stage = list(title = "Stage"), Sex = list(title = "Sex")),
   simple_anno_size = unit(4, "mm")
@@ -140,8 +140,6 @@ row_labels_clean <- sub("_(Early|Late)_(Male|Female)$", "", rownames(heatmap_mat
 # ============================================================
 group_sizes <- table(row_meta <- result %>% filter(target %in% colnames(heatmap_mat_log)) %>% pull(selectivity))
 pode_clusterizar_col <- all(group_sizes >= 2)
-
-cell_size <- unit(4, "mm")
 
 ht <- Heatmap(
   heatmap_mat_log,
@@ -173,6 +171,10 @@ ht <- Heatmap(
   }
 )
 
-png("heatmap_subtype_macrogroup_final.png", width = 3200, height = 2200, res = 150)
+png("heatmap_subtype_macrogroup_final.png", width = 2400, height = 1800, res = 130)
 draw(ht, heatmap_legend_side = "right")
 dev.off()
+
+
+
+
